@@ -129,25 +129,37 @@ def bit14():
     save(fig, "05_bit14")
 
 
-def mse():
+PSI_MPA = 0.006895
+
+
+def bit_energy():
+    """MSE на долоте и UCS по каждому футу интервала 8¾" (ниже 6000 фут по стволу)."""
     f = pd.read_parquet(ROOT / "data/feet.parquet")
     g = pd.read_parquet(ROOT / "data/geomech.parquet")
     f["ucs"] = f.ft.map(g.groupby(np.floor(g.md)).ucs_psi.mean())
-    f = f[(f.ft >= 6000) & (f.rpm > 30) & f.ucs.notna()].copy()
-    f["r_surf"], f["r_bit"] = f.mse / f.ucs, f.mse_bit / f.ucs
-    f["bin"] = (f.ft // 100) * 100
-    a = f.groupby("bin")[["r_surf", "r_bit", "tq"]].median().rolling(3, center=True, min_periods=1).median()
-    fig, ax = plt.subplots(figsize=(9, 4.2))
-    ax.plot(a.index * .3048, a.r_surf, color=GREY, lw=1.6, label="MSE по поверхностным параметрам (ротор, момент на роторе)")
-    ax.plot(a.index * .3048, a.r_bit, color=ACCENT, lw=2.2, label="MSE на долоте (обороты долота, момент двигателя по перепаду)")
-    ax.axhline(1, color=INK, lw=.8, ls=":")
-    ax.text(1830, 1.08, "MSE = UCS", fontsize=8, color=INK2)
-    ax.set_ylim(0, 5.5); ax.set_xlabel("глубина по стволу, м"); ax.set_ylabel("MSE / UCS, раз")
-    ax.grid(axis="y", color=LIGHT, lw=.6); ax.legend(fontsize=8.5, loc="upper left")
-    med_bit = f.r_bit.median()
-    head(fig, f"На долоте MSE держится около {n(med_bit, 1)} UCS, а рост по поверхности — трение в наклонном стволе",
-         f"Отношение MSE к прочности породы, медиана по 30 м, роторное бурение 8¾\". КПД долота ≈ UCS/MSE ≈ {n(100 / med_bit)}%. Момент на роторе вырос "
-         f"с {n(a.tq.iloc[0] / 1000, 1)} до {n(a.tq.iloc[-1] / 1000, 1)} тыс. фут·фунт. {SRC}")
+    f = f[(f.ft >= 6000) & f.ucs.notna() & f.mse_bit.notna()].copy()
+    f["zone"] = np.where(f.ft < 8020, "набор кривизны", "тангенс 65°")
+    f["mode"] = np.where(f.rpm > 30, "ротор + двигатель", "двигатель (ротор ≤ 30 об/мин)")
+    return f
+
+
+def mse():
+    f = bit_energy()
+    t = f.groupby(["zone", "mode"]).agg(mse=("mse_bit", "median"), ucs=("ucs", "median"), rop=("rop", "median"), n=("ft", "size"))
+    t[["mse", "ucs"]] *= PSI_MPA
+    t = t.iloc[::-1]
+    fig, ax = plt.subplots(figsize=(9, 3.9))
+    y = np.arange(len(t))
+    worst = t.mse.idxmax()
+    ax.barh(y, t.mse, color=[ACCENT if i == worst else CALM for i in t.index], height=.6)
+    ax.scatter(t.ucs, y, marker="|", s=900, color=INK, lw=2, zorder=3)
+    for i, (k, r) in enumerate(t.iterrows()):
+        ax.text(r.mse + 6, i, f"{n(r.mse)} МПа = {n(r.mse / r.ucs, 1)} UCS · {n(r.rop * .3048, 1)} м/ч", va="center", fontsize=9, color=INK)
+    ax.text(t.ucs.iloc[-1], len(t) - .45, "прочность породы (UCS)", fontsize=8, color=INK, ha="center")
+    ax.set_yticks(y, [f"{z}\n{m}" for z, m in t.index], fontsize=8.5)
+    ax.set_xlim(0, t.mse.max() * 1.55); ax.set_xticks([]); ax.spines["bottom"].set_visible(False)
+    head(fig, f"Хуже всего долото работало на наборе кривизны: энергии в {n(t.loc[worst].mse / t.loc[worst].ucs, 1)} раза больше, чем нужно граниту",
+         f"MSE на долоте, медиана по футам интервала 8¾\". Чем ближе столбец к черте UCS, тем больше энергии идёт в разрушение породы. {SRC}")
     save(fig, "06_mse")
 
 
@@ -170,7 +182,7 @@ def connections():
 def geomech():
     g = pd.read_parquet(ROOT / "data/geomech.parquet").iloc[::5]
     r = json.load(open(ROOT / "out/geomech.json"))
-    fig, (ax, ax2) = plt.subplots(1, 2, figsize=(9, 4.6), sharey=True, gridspec_kw={"width_ratios": [3, 1.3]})
+    fig, (ax, ax2, ax3) = plt.subplots(1, 3, figsize=(10, 4.8), sharey=True, gridspec_kw={"width_ratios": [3, 1.1, 2]})
     y = g.md * .3048
     ax.fill_betweenx(y, r["pp_ppg"], r["shmin_dfit_ppg"][0], color=LIGHT, lw=0)
     ax.plot(g.pp_ppg, y, color=INK2, lw=1.2, label="поровое давление")
@@ -182,8 +194,15 @@ def geomech():
     ax.legend(fontsize=7.5, loc="upper center", bbox_to_anchor=(.6, -.13), ncol=2)
     ax2.plot(g.enl, y, color=INK2, lw=.8)
     ax2.axvline(0, color=ACCENT, lw=1.2); ax2.set_xlabel("каверна, дюйм"); ax2.set_xlim(-.6, 1.2)
-    head(fig, f"Окно плотности широкое, ствол устойчив: {n(r['in_gauge'] * 100)}% интервала в номинале",
-         f"Интервал 8¾\" 1 829–3 335 м. Напряжения и UCS — расчёт Schlumberger по акустике и плотности; DFIT и керн — 0,66–0,78 psi/ft. {SRC}")
+    e = bit_energy()
+    e = e[e["mode"].str.startswith("ротор")].assign(bin=lambda d: (d.ft // 100) * 100).groupby("bin")[["mse_bit", "ucs"]].median().rolling(3, center=True, min_periods=1).median() * PSI_MPA
+    ax3.fill_betweenx(e.index * .3048, e.ucs, e.mse_bit, color="#fbe3d4", lw=0)
+    ax3.plot(e.ucs, e.index * .3048, color=INK, lw=1.4, label="прочность UCS")
+    ax3.plot(e.mse_bit, e.index * .3048, color=ACCENT, lw=1.8, label="MSE на долоте (ротор)")
+    ax3.axhline(8020 * .3048, color=GREY, lw=.8, ls=":"); ax3.text(690, 8020 * .3048 - 15, "конец набора кривизны", ha="right", fontsize=7.5, color=INK2)
+    ax3.set_xlabel("МПа, медиана по 30 м"); ax3.set_xlim(0, 700); ax3.legend(fontsize=7.5, loc="lower center", bbox_to_anchor=(.5, -.3))
+    head(fig, f"Ствол устойчив ({n(r['in_gauge'] * 100)}% в номинале), резерв — в режиме: в тангенсе MSE ближе к прочности гранита",
+         f"Интервал 8¾\" 1 829–3 335 м. Справа заливка — энергия сверх прочности породы. Напряжения и UCS — Schlumberger, DFIT, керн. {SRC}")
     save(fig, "08_geomech")
 
 
